@@ -1,11 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-# === Required ENV Variables (set by bootstrap.sh) ===
-# RSYNC_REMOTE_HOST  e.g., root@seedbox.ts.net
-# RSYNC_REMOTE_DIR   e.g., /root/seedbox/media/completed
+# === Required ENV Variables ===
+# RSYNC_REMOTE_HOST : e.g., root@seedbox.ts.net
+# RSYNC_REMOTE_DIR  : e.g., /root/seedbox/media/completed
 
-# === SSH Key Setup ===
+# === SSH Prep ===
 SSH_KEY=~/.ssh/id_ed25519
 SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no"
 
@@ -15,15 +15,16 @@ chmod 600 "$SSH_KEY"
 echo -e "Host *\n\tStrictHostKeyChecking no" > ~/.ssh/config
 chmod 600 ~/.ssh/config
 
-# === Sync List ===
+# === Get list of .syncdone files ===
+SYNC_LIST=/tmp/sync_list.txt
 echo "📥 Getting .syncdone files from $RSYNC_REMOTE_HOST..."
 ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" \
-  "find '$RSYNC_REMOTE_DIR' -maxdepth 1 -name '*.syncdone' -printf '%f\n'" > /tmp/sync_list.txt || touch /tmp/sync_list.txt
+  "find '$RSYNC_REMOTE_DIR' -maxdepth 1 -name '*.syncdone' -printf '%f\n'" > "$SYNC_LIST" || touch "$SYNC_LIST"
 
-echo "📋 Found $(wc -l < /tmp/sync_list.txt) items"
-cat /tmp/sync_list.txt
+echo "📋 Found $(wc -l < "$SYNC_LIST") items"
+cat "$SYNC_LIST"
 
-# === Begin Sync Loop ===
+# === Begin sync loop ===
 while IFS= read -r syncdone; do
   [ -z "$syncdone" ] && continue
   name="${syncdone%.syncdone}"
@@ -35,7 +36,7 @@ while IFS= read -r syncdone; do
 
   if ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -f '$REMOTE_PATH' ]"; then
     echo "📄 File detected — syncing $name"
-    rsync -avz --progress --info=progress2 --compress-choice=zstd \
+    rsync -avz --progress --info=flist2,progress2,name0 --compress-choice=zstd \
       --no-perms --no-owner --no-group \
       -e "ssh $SSH_OPTS" \
       "$REMOTE_SOURCE" "$LOCAL_DEST"
@@ -52,7 +53,7 @@ while IFS= read -r syncdone; do
 
   elif ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -d '$REMOTE_PATH' ]"; then
     echo "📁 Directory detected — syncing contents of $name"
-    rsync -avz --progress --info=progress2 --compress-choice=zstd \
+    rsync -avz --progress --info=flist2,progress2,name0 --compress-choice=zstd \
       --no-perms --no-owner --no-group \
       -e "ssh $SSH_OPTS" \
       "$REMOTE_SOURCE/" "$LOCAL_DEST"
@@ -63,6 +64,6 @@ while IFS= read -r syncdone; do
   else
     echo "⚠️ Not found on remote: $name"
   fi
-done < /tmp/sync_list.txt
+done < "$SYNC_LIST"
 
 echo -e "\n🎉 Sync complete"
