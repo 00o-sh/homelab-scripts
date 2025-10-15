@@ -18,10 +18,8 @@ chmod 600 ~/.ssh/config
 # === Vars (same paths you used) ===
 SYNC_LIST=/tmp/sync_list.txt
 LOCAL_DEST="/local"
-PARTIAL_DIR="$LOCAL_DEST/.rsync-partials"
-mkdir -p "$LOCAL_DEST" "$PARTIAL_DIR"
+mkdir -p "$LOCAL_DEST"
 
-# Use plain echo (no emojis) for loggers—some container logs/TTYs dislike them
 log() { printf "%s %s\n" "$(date '+%F %T')" "$*"; }
 
 # Retry wrapper that won't exit the whole script when rsync fails
@@ -36,7 +34,7 @@ retry_rsync() {
     log "rsync attempt $attempts/$max_attempts: $src -> $dest"
     # Allow rsync to fail without killing script
     set +e
-    rsync -avz --append-verify --partial --partial-dir="$PARTIAL_DIR" \
+    rsync -avz --append-verify --partial \
       --progress --info=flist2,progress2,name0 --compress-choice=zstd \
       --no-perms --no-owner --no-group \
       -e "ssh $SSH_OPTS" \
@@ -57,30 +55,17 @@ retry_rsync() {
   done
 }
 
-# Small helpers; all guarded so failures don’t kill script
-remote_is_file() {
-  ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -f \"$1\" ]"
-}
-remote_is_dir() {
-  ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -d \"$1\" ]"
-}
+remote_is_file() { ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -f \"$1\" ]"; }
+remote_is_dir()  { ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -d \"$1\" ]"; }
 remote_sha256() {
-  # Return empty on failure rather than exiting
   set +e
   out=$(ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "sha256sum \"$1\" | cut -d ' ' -f1" 2>/dev/null)
   rc=$?
   set -e
   [ $rc -eq 0 ] && printf "%s" "$out" || printf ""
 }
-local_sha256() {
-  sha256sum "$1" | cut -d ' ' -f1
-}
-remote_rm() {
-  # Don’t fail whole script if this rm has an issue
-  set +e
-  ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "rm -f \"$1\""
-  set -e
-}
+local_sha256()  { sha256sum "$1" | cut -d ' ' -f1; }
+remote_rm()     { set +e; ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "rm -f \"$1\""; set -e; }
 
 # === Get list of .syncdone files ===
 log "Getting .syncdone files from $RSYNC_REMOTE_HOST..."
@@ -107,7 +92,6 @@ while IFS= read -r syncdone; do
   if remote_is_file "$REMOTE_PATH"; then
     log "File detected — syncing $name"
 
-    # If local exists and matches, just clear marker
     if [ -f "$LOCAL_DEST/$name" ]; then
       R_HASH="$(remote_sha256 "$REMOTE_PATH")"
       L_HASH="$(local_sha256 "$LOCAL_DEST/$name")"
@@ -120,7 +104,6 @@ while IFS= read -r syncdone; do
     fi
 
     if retry_rsync "$REMOTE_SOURCE" "$LOCAL_DEST"; then
-      # Verify integrity
       R_HASH="$(remote_sha256 "$REMOTE_PATH")"
       L_HASH="$(local_sha256 "$LOCAL_DEST/$name")"
       if [ -n "$R_HASH" ] && [ "$R_HASH" = "$L_HASH" ]; then
