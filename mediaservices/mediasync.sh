@@ -15,8 +15,38 @@ chmod 600 "$SSH_KEY"
 echo -e "Host *\n\tStrictHostKeyChecking no" > ~/.ssh/config
 chmod 600 ~/.ssh/config
 
-# === Get list of .syncdone files ===
+# === Vars ===
 SYNC_LIST=/tmp/sync_list.txt
+LOCAL_DEST="/local"
+PARTIAL_DIR="$LOCAL_DEST/.rsync-partials"
+mkdir -p "$LOCAL_DEST" "$PARTIAL_DIR"
+
+# === Helper ===
+retry_rsync() {
+  local src="$1"
+  local dest="$2"
+  local attempt=0
+  local max_attempts=3
+
+  while (( attempt < max_attempts )); do
+    ((attempt++))
+    echo "🔁 Attempt $attempt/$max_attempts..."
+    if rsync -avz --append-verify --partial --partial-dir="$PARTIAL_DIR" \
+      --progress --info=flist2,progress2,name0 --compress-choice=zstd \
+      --no-perms --no-owner --no-group \
+      -e "ssh $SSH_OPTS" "$src" "$dest"; then
+      echo "✅ rsync completed successfully"
+      return 0
+    fi
+    echo "⚠️ rsync failed (attempt $attempt). Retrying in 10s..."
+    sleep 10
+  done
+
+  echo "❌ rsync failed after $max_attempts attempts"
+  return 1
+}
+
+# === Get list of .syncdone files ===
 echo "📥 Getting .syncdone files from $RSYNC_REMOTE_HOST..."
 ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" \
   "find '$RSYNC_REMOTE_DIR' -maxdepth 1 -name '*.syncdone' -printf '%f\n'" > "$SYNC_LIST" || touch "$SYNC_LIST"
@@ -32,14 +62,10 @@ while IFS= read -r syncdone; do
 
   REMOTE_PATH="$RSYNC_REMOTE_DIR/$name"
   REMOTE_SOURCE="$RSYNC_REMOTE_HOST:$REMOTE_PATH"
-  LOCAL_DEST="/local/"
 
   if ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -f '$REMOTE_PATH' ]"; then
     echo "📄 File detected — syncing $name"
-    rsync -avz --progress --info=flist2,progress2,name0 --compress-choice=zstd \
-      --no-perms --no-owner --no-group \
-      -e "ssh $SSH_OPTS" \
-      "$REMOTE_SOURCE" "$LOCAL_DEST"
+    retry_rsync "$REMOTE_SOURCE" "$LOCAL_DEST"
 
     REMOTE_HASH=$(ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "sha256sum '$REMOTE_PATH' | cut -d ' ' -f1")
     LOCAL_HASH=$(sha256sum "$LOCAL_DEST/$name" | cut -d ' ' -f1)
@@ -53,11 +79,7 @@ while IFS= read -r syncdone; do
 
   elif ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -d '$REMOTE_PATH' ]"; then
     echo "📁 Directory detected — syncing contents of $name"
-    rsync -avz --progress --info=flist2,progress2,name0 --compress-choice=zstd \
-      --no-perms --no-owner --no-group \
-      -e "ssh $SSH_OPTS" \
-      "$REMOTE_SOURCE/" "$LOCAL_DEST"
-
+    retry_rsync "$REMOTE_SOURCE/" "$LOCAL_DEST"
     echo "✅ Folder synced: $name"
     ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "rm -f '$RSYNC_REMOTE_DIR/${name}.syncdone'"
 
