@@ -10,21 +10,28 @@ SSH_KEY="$HOME/.ssh/id_ed25519"
 SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no"
 
 mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
-cp /id_ed25519 "$SSH_KEY"
-chmod 600 "$SSH_KEY"
+
+# Check if SSH key exists before copying
+if [ -f /id_ed25519 ]; then
+  cp /id_ed25519 "$SSH_KEY"
+  chmod 600 "$SSH_KEY"
+else
+  echo "ERROR: SSH key /id_ed25519 not found"
+  exit 1
+fi
+
 printf "Host *\n\tStrictHostKeyChecking no\n" > "$HOME/.ssh/config"
 chmod 600 "$HOME/.ssh/config"
 
-# === Vars (same structure) ===
+# === Vars ===
 SYNC_LIST=/tmp/sync_list.txt
 LOCAL_DEST="/local"
 mkdir -p "$LOCAL_DEST"
 
 log() { printf "%s %s\n" "$(date '+%F %T')" "$*"; }
 
-# Retry wrapper with resume via --partial --inplace (compatible with any partial-dir)
+# Retry wrapper with resume via --partial --inplace
 retry_rsync() {
-  # args: <src> <dest> <is_dir:true|false>
   src="$1"
   dest="$2"
   is_dir="$3"
@@ -34,18 +41,17 @@ retry_rsync() {
   # directory semantics
   [ "$is_dir" = "true" ] && src="${src%/}/"
 
-  # scrub common rsync partial env vars on the client; --inplace avoids conflicts anyway
-  RSYNC_ENV="env -u RSYNC_PARTIAL_DIR -u RSYNC_PARTIAL"
-
   while [ "$attempts" -lt "$max_attempts" ]; do
     attempts=$((attempts+1))
     log "rsync attempt $attempts/$max_attempts: $src -> $dest"
 
     set +e
-    # -a archive, -v verbose, -z compress; --partial keeps partial file, --inplace resumes in place
-    $RSYNC_ENV rsync -avz --partial --inplace \
+    # Clear rsync partial vars on BOTH client and remote
+    env -u RSYNC_PARTIAL_DIR -u RSYNC_PARTIAL \
+      rsync -avz --partial --inplace \
       --progress --info=flist2,progress2,name0 \
       --no-perms --no-owner --no-group \
+      --rsync-path="env -u RSYNC_PARTIAL_DIR -u RSYNC_PARTIAL rsync" \
       -e "ssh $SSH_OPTS" \
       "$src" "$dest"
     status=$?
@@ -75,8 +81,14 @@ remote_sha256() {
   set -e
   [ $rc -eq 0 ] && printf "%s" "$out" || printf ""
 }
-local_sha256()  { sha256sum "$1" | cut -d ' ' -f1; }
-remote_rm()     { set +e; ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "rm -f \"$1\""; set -e; }
+
+local_sha256() { sha256sum "$1" | cut -d ' ' -f1; }
+
+remote_rm() {
+  set +e
+  ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "rm -f \"$1\""
+  set -e
+}
 
 # === Get list of .syncdone files ===
 log "Getting .syncdone files from $RSYNC_REMOTE_HOST..."
