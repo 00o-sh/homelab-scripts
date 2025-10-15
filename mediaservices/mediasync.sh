@@ -22,20 +22,7 @@ mkdir -p "$LOCAL_DEST"
 
 log() { printf "%s %s\n" "$(date '+%F %T')" "$*"; }
 
-# Detect rsync's compress support; fall back if needed
-detect_compress_args() {
-  set +e
-  if rsync --help 2>/dev/null | grep -q -- '--compress-choice'; then
-    echo "-z --compress-choice=zstd"
-  else
-    echo "-z"
-  fi
-  set -e
-}
-
-COMPRESS_ARGS="$(detect_compress_args)"
-
-# Retry wrapper with resume. Also scrubs env that may inject a partial-dir.
+# Retry wrapper with resume via --partial --inplace (compatible with any partial-dir)
 retry_rsync() {
   # args: <src> <dest> <is_dir:true|false>
   src="$1"
@@ -44,12 +31,10 @@ retry_rsync() {
   attempts=0
   max_attempts=3
 
-  # ensure trailing slash semantics for directories
-  if [ "$is_dir" = "true" ]; then
-    src="${src%/}/"
-  fi
+  # directory semantics
+  [ "$is_dir" = "true" ] && src="${src%/}/"
 
-  # scrub env that might add --partial-dir implicitly
+  # scrub common rsync partial env vars on the client; --inplace avoids conflicts anyway
   RSYNC_ENV="env -u RSYNC_PARTIAL_DIR -u RSYNC_PARTIAL"
 
   while [ "$attempts" -lt "$max_attempts" ]; do
@@ -57,9 +42,8 @@ retry_rsync() {
     log "rsync attempt $attempts/$max_attempts: $src -> $dest"
 
     set +e
-    # NOTE: --append-verify + --partial gives resumable large-file transfers.
-    #       --no-partial-dir blocks any implicit partial-dir conflict.
-    $RSYNC_ENV rsync -av $COMPRESS_ARGS --append-verify --partial --no-partial-dir \
+    # -a archive, -v verbose, -z compress; --partial keeps partial file, --inplace resumes in place
+    $RSYNC_ENV rsync -avz --partial --inplace \
       --progress --info=flist2,progress2,name0 \
       --no-perms --no-owner --no-group \
       -e "ssh $SSH_OPTS" \
@@ -119,7 +103,7 @@ while IFS= read -r syncdone; do
   if remote_is_file "$REMOTE_PATH"; then
     log "File detected — syncing $name"
 
-    # If local file exists and matches, clear marker immediately
+    # If local exists and matches, clear marker
     if [ -f "$LOCAL_DEST/$name" ]; then
       R_HASH="$(remote_sha256 "$REMOTE_PATH")"
       L_HASH="$(local_sha256 "$LOCAL_DEST/$name")"
