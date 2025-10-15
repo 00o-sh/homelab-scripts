@@ -6,41 +6,67 @@ set -euo pipefail
 # RSYNC_REMOTE_DIR  : e.g., /root/seedbox/media/completed
 
 # === SSH Prep ===
-SSH_KEY=~/.ssh/id_ed25519
+SSH_KEY="$HOME/.ssh/id_ed25519"
 SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no"
 
-mkdir -p ~/.ssh && chmod 700 ~/.ssh
+mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
 cp /id_ed25519 "$SSH_KEY"
 chmod 600 "$SSH_KEY"
-printf "Host *\n\tStrictHostKeyChecking no\n" > ~/.ssh/config
-chmod 600 ~/.ssh/config
+printf "Host *\n\tStrictHostKeyChecking no\n" > "$HOME/.ssh/config"
+chmod 600 "$HOME/.ssh/config"
 
-# === Vars (same paths you used) ===
+# === Vars (same structure) ===
 SYNC_LIST=/tmp/sync_list.txt
 LOCAL_DEST="/local"
 mkdir -p "$LOCAL_DEST"
 
 log() { printf "%s %s\n" "$(date '+%F %T')" "$*"; }
 
-# Retry wrapper that won't exit the whole script when rsync fails
+# Detect rsync's compress support; fall back if needed
+detect_compress_args() {
+  set +e
+  if rsync --help 2>/dev/null | grep -q -- '--compress-choice'; then
+    echo "-z --compress-choice=zstd"
+  else
+    echo "-z"
+  fi
+  set -e
+}
+
+COMPRESS_ARGS="$(detect_compress_args)"
+
+# Retry wrapper with resume. Also scrubs env that may inject a partial-dir.
 retry_rsync() {
-  # args: <src> <dest>
+  # args: <src> <dest> <is_dir:true|false>
   src="$1"
   dest="$2"
+  is_dir="$3"
   attempts=0
   max_attempts=3
+
+  # ensure trailing slash semantics for directories
+  if [ "$is_dir" = "true" ]; then
+    src="${src%/}/"
+  fi
+
+  # scrub env that might add --partial-dir implicitly
+  RSYNC_ENV="env -u RSYNC_PARTIAL_DIR -u RSYNC_PARTIAL"
+
   while [ "$attempts" -lt "$max_attempts" ]; do
     attempts=$((attempts+1))
     log "rsync attempt $attempts/$max_attempts: $src -> $dest"
-    # Allow rsync to fail without killing script
+
     set +e
-    rsync -avz --append-verify --partial \
-      --progress --info=flist2,progress2,name0 --compress-choice=zstd \
+    # NOTE: --append-verify + --partial gives resumable large-file transfers.
+    #       --no-partial-dir blocks any implicit partial-dir conflict.
+    $RSYNC_ENV rsync -av $COMPRESS_ARGS --append-verify --partial --no-partial-dir \
+      --progress --info=flist2,progress2,name0 \
       --no-perms --no-owner --no-group \
       -e "ssh $SSH_OPTS" \
       "$src" "$dest"
     status=$?
     set -e
+
     if [ $status -eq 0 ]; then
       log "rsync completed."
       return 0
@@ -57,6 +83,7 @@ retry_rsync() {
 
 remote_is_file() { ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -f \"$1\" ]"; }
 remote_is_dir()  { ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "[ -d \"$1\" ]"; }
+
 remote_sha256() {
   set +e
   out=$(ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" "sha256sum \"$1\" | cut -d ' ' -f1" 2>/dev/null)
@@ -92,6 +119,7 @@ while IFS= read -r syncdone; do
   if remote_is_file "$REMOTE_PATH"; then
     log "File detected — syncing $name"
 
+    # If local file exists and matches, clear marker immediately
     if [ -f "$LOCAL_DEST/$name" ]; then
       R_HASH="$(remote_sha256 "$REMOTE_PATH")"
       L_HASH="$(local_sha256 "$LOCAL_DEST/$name")"
@@ -103,7 +131,7 @@ while IFS= read -r syncdone; do
       log "Local exists but hash mismatch. Will resume transfer."
     fi
 
-    if retry_rsync "$REMOTE_SOURCE" "$LOCAL_DEST"; then
+    if retry_rsync "$REMOTE_SOURCE" "$LOCAL_DEST" "false"; then
       R_HASH="$(remote_sha256 "$REMOTE_PATH")"
       L_HASH="$(local_sha256 "$LOCAL_DEST/$name")"
       if [ -n "$R_HASH" ] && [ "$R_HASH" = "$L_HASH" ]; then
@@ -118,7 +146,7 @@ while IFS= read -r syncdone; do
 
   elif remote_is_dir "$REMOTE_PATH"; then
     log "Directory detected — syncing contents of $name"
-    if retry_rsync "$REMOTE_SOURCE/" "$LOCAL_DEST"; then
+    if retry_rsync "$REMOTE_SOURCE" "$LOCAL_DEST" "true"; then
       log "Folder synced: $name"
       remote_rm "$RSYNC_REMOTE_DIR/${name}.syncdone"
     else
