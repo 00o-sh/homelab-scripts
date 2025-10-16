@@ -38,9 +38,6 @@ retry_rsync() {
   attempts=0
   max_attempts=3
 
-  # directory semantics
-  [ "$is_dir" = "true" ] && src="${src%/}/"
-
   while [ "$attempts" -lt "$max_attempts" ]; do
     attempts=$((attempts+1))
     log "rsync attempt $attempts/$max_attempts: $src -> $dest"
@@ -91,7 +88,7 @@ remote_rm() {
 }
 
 # === Get list of .syncdone files ===
-log "Getting .syncdone files from $RSYNC_REMOTE_HOST..."
+log "Getting .syncdone files from $RSYNC_REMOTE_HOST:$RSYNC_REMOTE_DIR..."
 set +e
 ssh $SSH_OPTS "$RSYNC_REMOTE_HOST" \
   "find '$RSYNC_REMOTE_DIR' -maxdepth 1 -type f -name '*.syncdone' -printf '%f\n'" > "$SYNC_LIST"
@@ -100,13 +97,14 @@ set -e
 [ $rc -ne 0 ] && : > "$SYNC_LIST"
 
 count=$(wc -l < "$SYNC_LIST" | tr -d ' ')
-log "Found $count items"
+log "Found $count .syncdone markers"
 [ "$count" -gt 0 ] && cat "$SYNC_LIST"
 
 # === Begin sync loop ===
 while IFS= read -r syncdone; do
   [ -z "$syncdone" ] && continue
   name="${syncdone%.syncdone}"
+  log "=========================================="
   log "Processing: $name"
 
   REMOTE_PATH="$RSYNC_REMOTE_DIR/$name"
@@ -141,17 +139,21 @@ while IFS= read -r syncdone; do
     fi
 
   elif remote_is_dir "$REMOTE_PATH"; then
-    log "Directory detected — syncing contents of $name"
-    if retry_rsync "$REMOTE_SOURCE" "$LOCAL_DEST" "true"; then
-      log "Folder synced: $name"
+    log "Directory detected — syncing ALL contents of $name/"
+    
+    # Sync directory: use -r and trailing slash to copy contents into destination
+    # This will create /local/$name/ and copy all contents into it
+    if retry_rsync "${REMOTE_SOURCE}/" "$LOCAL_DEST/$name/" "true"; then
+      log "Folder synced: $name/ (all contents)"
       remote_rm "$RSYNC_REMOTE_DIR/${name}.syncdone"
     else
       log "Folder failed after retries — leaving .syncdone in place"
     fi
 
   else
-    log "Not found on remote: $name"
+    log "WARNING: Not found on remote: $name"
   fi
 done < "$SYNC_LIST"
 
+log "=========================================="
 log "Sync complete"
